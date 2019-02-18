@@ -37,6 +37,13 @@
 
 #if __IPHONE_OS_VERSION_MAX_ALLOWED >= 110000
 
+@implementation UIScrollView (NoBounce)
+- (void)didMoveToWindow {
+   [super didMoveToWindow];
+   self.bounces = NO;
+}
+@end
+
 @implementation UIScrollView (BugIOS11)
 
 + (void)load {
