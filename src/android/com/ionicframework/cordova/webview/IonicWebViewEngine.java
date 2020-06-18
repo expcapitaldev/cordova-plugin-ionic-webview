@@ -5,18 +5,21 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
+import android.net.Uri;
+import android.os.Build;
 import android.util.Log;
+import android.webkit.ServiceWorkerController;
+import android.webkit.ServiceWorkerClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
-
 import org.apache.cordova.ConfigXmlParser;
 import org.apache.cordova.CordovaInterface;
 import org.apache.cordova.CordovaPreferences;
 import org.apache.cordova.CordovaResourceApi;
 import org.apache.cordova.CordovaWebView;
 import org.apache.cordova.CordovaWebViewEngine;
-
 import org.apache.cordova.NativeToJsMessageQueue;
 import org.apache.cordova.PluginManager;
 import org.apache.cordova.engine.SystemWebViewClient;
@@ -28,11 +31,13 @@ public class IonicWebViewEngine extends SystemWebViewEngine {
 
   private WebViewLocalServer localServer;
   private String CDV_LOCAL_SERVER;
+  private String scheme;
   private static final String LAST_BINARY_VERSION_CODE = "lastBinaryVersionCode";
   private static final String LAST_BINARY_VERSION_NAME = "lastBinaryVersionName";
 
-
-  /** Used when created via reflection. */
+  /**
+   * Used when created via reflection.
+   */
   public IonicWebViewEngine(Context context, CordovaPreferences preferences) {
     super(new SystemWebView(context), preferences);
     Log.d(TAG, "Ionic Web View Engine Starting Right Up 1...");
@@ -55,19 +60,38 @@ public class IonicWebViewEngine extends SystemWebViewEngine {
     ConfigXmlParser parser = new ConfigXmlParser();
     parser.parse(cordova.getActivity());
 
-    String port = preferences.getString("WKPort", "8080");
-    CDV_LOCAL_SERVER = "http://localhost:" + port;
+    String hostname = preferences.getString("Hostname", "localhost");
+    scheme = preferences.getString("Scheme", "http");
+    CDV_LOCAL_SERVER = scheme + "://" + hostname;
 
-    localServer = new WebViewLocalServer(cordova.getActivity(), "localhost:" + port, true, parser);
-    WebViewLocalServer.AssetHostingDetails ahd = localServer.hostAssets("www");
+    localServer = new WebViewLocalServer(cordova.getActivity(), hostname, true, parser, scheme);
+    localServer.hostAssets("www");
 
     webView.setWebViewClient(new ServerClient(this, parser));
 
     super.init(parentWebView, cordova, client, resourceApi, pluginManager, nativeToJsMessageQueue);
+    if (android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      final WebSettings settings = webView.getSettings();
+      int mode = preferences.getInteger("MixedContentMode", 0);
+      settings.setMixedContentMode(mode);
+    }
     SharedPreferences prefs = cordova.getActivity().getApplicationContext().getSharedPreferences(IonicWebView.WEBVIEW_PREFS_NAME, Activity.MODE_PRIVATE);
     String path = prefs.getString(IonicWebView.CDV_SERVER_PATH, null);
-    if (!isNewBinary() && path != null && !path.isEmpty()) {
+    if (!isDeployDisabled() && !isNewBinary() && path != null && !path.isEmpty()) {
       setServerBasePath(path);
+    }
+
+    boolean setAsServiceWorkerClient = preferences.getBoolean("ResolveServiceWorkerRequests", false);
+    ServiceWorkerController controller = null;
+
+    if (setAsServiceWorkerClient && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+        controller = ServiceWorkerController.getInstance();
+        controller.setServiceWorkerClient(new ServiceWorkerClient(){
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
+                return localServer.shouldInterceptRequest(request.getUrl(), request);
+            }
+        });
     }
   }
 
@@ -97,8 +121,10 @@ public class IonicWebViewEngine extends SystemWebViewEngine {
     return false;
   }
 
-  private class ServerClient extends SystemWebViewClient
-  {
+  private boolean isDeployDisabled() {
+    return preferences.getBoolean("DisableDeploy", false);
+  }
+  private class ServerClient extends SystemWebViewClient {
     private ConfigXmlParser parser;
 
     public ServerClient(SystemWebViewEngine parentEngine, ConfigXmlParser parser) {
@@ -108,15 +134,21 @@ public class IonicWebViewEngine extends SystemWebViewEngine {
 
     @Override
     public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-      return localServer.shouldInterceptRequest(request);
+      return localServer.shouldInterceptRequest(request.getUrl(), request);
     }
 
     @Override
     public void onPageStarted(WebView view, String url, Bitmap favicon) {
       super.onPageStarted(view, url, favicon);
-      if (url.equals(parser.getLaunchUrl())) {
+      String launchUrl = parser.getLaunchUrl();
+      if (!launchUrl.contains(WebViewLocalServer.httpsScheme) && !launchUrl.contains(WebViewLocalServer.httpScheme) && url.equals(launchUrl)) {
         view.stopLoading();
-        view.loadUrl(CDV_LOCAL_SERVER);
+        // When using a custom scheme the app won't load if server start url doesn't end in /
+        String startUrl = CDV_LOCAL_SERVER;
+        if (!scheme.equalsIgnoreCase(WebViewLocalServer.httpsScheme) && !scheme.equalsIgnoreCase(WebViewLocalServer.httpScheme)) {
+          startUrl += "/";
+        }
+        view.loadUrl(startUrl);
       }
     }
 
@@ -124,12 +156,12 @@ public class IonicWebViewEngine extends SystemWebViewEngine {
     public void onPageFinished(WebView view, String url) {
       super.onPageFinished(view, url);
       view.loadUrl("javascript:(function() { " +
-              "window.WEBVIEW_SERVER_URL = '" + CDV_LOCAL_SERVER + "'" +
+              "window.WEBVIEW_SERVER_URL = '" + CDV_LOCAL_SERVER + "';" +
               "})()");
     }
   }
 
-  public void setServerBasePath(String path){
+  public void setServerBasePath(String path) {
     localServer.hostFiles(path);
     webView.loadUrl(CDV_LOCAL_SERVER);
   }
@@ -138,4 +170,3 @@ public class IonicWebViewEngine extends SystemWebViewEngine {
     return this.localServer.getBasePath();
   }
 }
-
